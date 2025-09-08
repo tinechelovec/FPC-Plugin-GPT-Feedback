@@ -1,233 +1,247 @@
-from __future__ import annotations
-from typing import TYPE_CHECKING
 import os
 import json
-import re
 import time
+import random
 import logging
-from datetime import datetime
+import g4f
 
-from g4f.client import Client
-from FunPayAPI.types import MessageTypes
 from FunPayAPI.updater.events import NewMessageEvent
-from telebot.types import InlineKeyboardButton
+from locales.localizer import Localizer
 from tg_bot import keyboards
-
-if TYPE_CHECKING:
-    from cardinal import Cardinal
-
-NAME = "GPT Feedback"
-VERSION = "1.0"
-DESCRIPTION = "Отвечает на отзывы через GPT."
-CREDITS = "@tinechelovec"
-UUID = "461770a6-4460-4cf5-9eec-c41dc99fc64c"
-SETTINGS_PAGE = False
+from telebot.types import Message, InlineKeyboardButton
 
 logger = logging.getLogger(f"FPC.{__name__}")
-PREFIX = "[GPT Feedback]"
-def log(msg: str):
+
+PREFIX = '[GPT Consultant]'
+
+def log(msg):
     logger.info(f"{PREFIX} {msg}")
 
-PLUGIN_FOLDER = "storage/plugins/gpt_feedback"
+NAME = "GPT Info"
+VERSION = "1.1"
+DESCRIPTION = "GPT-консультант по товара."
+UUID = "6b2c95ba-95e6-46e0-ae1c-84083993715c"
+SETTINGS_PAGE = False
+CREDITS = "@tinechelovec"
+
+log("Запустил плагин GPT-консультанта (v1.1)")
+
+PLUGIN_FOLDER = "storage/plugins/gpt_info"
 DATA_FILE = os.path.join(PLUGIN_FOLDER, "data.json")
 os.makedirs(PLUGIN_FOLDER, exist_ok=True)
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({}, f, indent=4, ensure_ascii=False)
-
-MAX_ATTEMPTS = 5
-MAX_CHARACTERS = 700
-MIN_CHARACTERS = 50
-ORDER_ID_REGEX = re.compile(r"#([A-Za-z0-9]+)")
-client = Client()
-
-PROMPT_TEMPLATE = """
-Привет! Ты — ИИ-ассистент в магазине игровых ценностей.
-Данные заказа:
-    - Оценка: {rating} из 5
-    - Отзыв: {text}
-
-Составь дружелюбный ответ:
-- Используй эмодзи.
-- Пожелай что-то хорошее.
-- Сделай шутку про покупку.
-- В конце добавь: спасибо за {rating} звезд и отзыв от {date} {time}!
-"""
+        json.dump({"enabled": True, "command": "#info"}, f, indent=4, ensure_ascii=False)
 
 def load_data() -> dict:
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        log(f"Ошибка загрузки data.json: {e}")
-        return {}
+        logger.error(f"Ошибка чтения data.json: {e}")
+        return {"enabled": True, "command": "#info"}
 
 def save_data(data: dict):
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
     except Exception as e:
-        log(f"Ошибка сохранения data.json: {e}")
+        logger.error(f"Ошибка записи data.json: {e}")
 
-def truncate(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
-def build_prompt(order) -> str:
-    rating = getattr(order.review, "stars", None) or "5"
-    text = getattr(order.review, "text", None) or "Спасибо!"
-    return PROMPT_TEMPLATE.format(
-        rating=rating,
-        text=text,
-        date=datetime.now().strftime("%d.%m.%Y"),
-        time=datetime.now().strftime("%H:%M:%S"),
-    )
+try:
+    orig_edit_plugin = keyboards.edit_plugin
+    def custom_edit_plugin(c, uuid, offset=0, ask_to_delete=False):
+        kb = orig_edit_plugin(c, uuid, offset, ask_to_delete)
+        if uuid == UUID:
+            dev_btn = InlineKeyboardButton(text="👽 Разработчик", url=f"https://t.me/{CREDITS[1:]}")
+            kb.keyboard[0] = [dev_btn]
+        return kb
+    keyboards.edit_plugin = custom_edit_plugin
+except Exception:
+    pass
 
-def generate_response(prompt: str) -> str:
-    for attempt in range(MAX_ATTEMPTS):
+def generate_gpt_response(prompt: str, max_attempts: int = 10, min_delay: float = 0.5, max_delay: float = 1.5) -> str | None:
+    for attempt in range(1, max_attempts + 1):
         try:
-            response = client.chat.completions.create(
+            log(f"g4f: попытка {attempt}/{max_attempts}")
+            response = g4f.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}]
             )
-            text = " ".join(response.choices[0].message.content.strip().splitlines())
-            if len(text) < MIN_CHARACTERS:
-                log(f"Ответ GPT слишком короткий (попытка {attempt+1})")
+            if not isinstance(response, str):
+                response = str(response)
+            response = response.strip()
+
+            if "Login to continue using" in response or "login to continue using" in response.lower():
+                log(f"g4f: обнаружена ошибка авторизации в ответе (попытка {attempt}), повторяем...")
+                time.sleep(random.uniform(min_delay, max_delay))
                 continue
-            if len(text) > MAX_CHARACTERS:
-                text = truncate(text, MAX_CHARACTERS)
-            return text
+
+            return response
+
         except Exception as e:
-            log(f"Ошибка GPT: {e}")
-            time.sleep(1)
-    return "Спасибо за отзыв! 😊"
-
-def parse_stars_args(text: str) -> list:
-    parts = re.split(r"[\s,;]+", text.strip())
-    stars = []
-    for p in parts:
-        if not p:
+            logger.error(f"[g4f] Ошибка при генерации (попытка {attempt}): {e}")
+            logger.debug("TRACEBACK", exc_info=True)
+            time.sleep(random.uniform(min_delay, max_delay))
             continue
+
+    return None
+
+def gpt_info_handler(cardinal, e: NewMessageEvent):
+    data = load_data()
+    enabled = data.get("enabled", True)
+    command = data.get("command", "#info")
+
+    if not enabled:
+        return
+
+    message = e.message
+    if not message.text:
+        return
+
+
+    if message.text.strip().lower() != command.lower():
+        parts = message.text.strip().split(maxsplit=1)
+        if parts and parts[0].lower() != command.lower():
+            return
+
+    log(f"Новое сообщение: {message.text} (чат {message.chat_id})")
+
+    text = message.text.strip()
+    parts = text.split(maxsplit=2)
+    lot_id = None
+    question = ""
+    if len(parts) >= 2 and parts[1].isdigit():
+        lot_id = int(parts[1])
+        question = parts[2] if len(parts) > 2 else ""
+    else:
+        if len(parts) >= 2:
+            question = parts[1] if len(parts) == 2 else parts[1] + (" " + parts[2] if len(parts) > 2 else "")
+        else:
+            question = ""
+
+    if not lot_id:
         try:
-            n = int(p)
-            if 1 <= n <= 5 and n not in stars:
-                stars.append(n)
-        except ValueError:
-            continue
-    return sorted(stars)
+            chat = cardinal.account.get_chat(message.chat_id, False)
+            if chat and getattr(chat, "looking_link", None):
+                lot_id = chat.looking_link.split("=")[-1]
+            else:
+                cardinal.send_message(message.chat_id, "Не удалось определить ID лота.")
+                return
+        except Exception as e:
+            logger.error(f"Ошибка получения чата для определения лота: {e}")
+            cardinal.send_message(message.chat_id, "Не удалось определить ID лота.")
+            return
 
-def cmd_toggle(message, cardinal: 'Cardinal'):
-    uid = str(message.chat.id)
-    data = load_data()
-    user = data.get(uid, {"enabled": False, "stars": [5]})
-    user["enabled"] = not user.get("enabled", False)
-    data[uid] = user
-    save_data(data)
-    state = "включён" if user["enabled"] else "выключен"
-    cardinal.telegram.bot.send_message(message.chat.id, f"✅ Плагин {state} для вашего чата.")
-    log(f"Пользователь {uid} переключил плагин: {state}")
+    log(f"ID товара: {lot_id}, Вопрос: {question}")
 
-def cmd_setstars(message, cardinal: 'Cardinal'):
-    args = message.text.replace("/gptfeedback_setstars", "", 1).strip()
-    uid = str(message.chat.id)
-    if not args:
-        cardinal.telegram.bot.send_message(
-            message.chat.id,
-            "❗ Использование: /gptfeedback_setstars 5 4 3"
-        )
-        return
-    stars = parse_stars_args(args)
-    if not stars:
-        cardinal.telegram.bot.send_message(message.chat.id, "❌ Укажите числа от 1 до 5.")
-        return
-    data = load_data()
-    user = data.get(uid, {"enabled": False, "stars": [5]})
-    user["stars"] = stars
-    data[uid] = user
-    save_data(data)
-    cardinal.telegram.bot.send_message(message.chat.id, f"✅ Отвечаем на отзывы: {', '.join(map(str, stars))} звёзд.")
-    log(f"Пользователь {uid} установил звёзды: {stars}")
-
-def cmd_status(message, cardinal: 'Cardinal'):
-    uid = str(message.chat.id)
-    data = load_data()
-    user = data.get(uid)
-    if not user:
-        cardinal.telegram.bot.send_message(message.chat.id, "ℹ️ Плагин выключен, звёзды: 5")
-        return
-    enabled = user.get("enabled", False)
-    stars = user.get("stars", [5])
-    text = f"🔧 Статус плагина: {'ВКЛ' if enabled else 'ВЫКЛ'}\n⭐ Звёзды: {', '.join(map(str, stars))}"
-    cardinal.telegram.bot.send_message(message.chat.id, text)
-
-def handle_feedback_event(cardinal: 'Cardinal', event: NewMessageEvent):
-    if event.message.type not in (
-        MessageTypes.NEW_FEEDBACK,
-        MessageTypes.FEEDBACK_CHANGED,
-        MessageTypes.FEEDBACK_DELETED
-    ):
-        return
-
-    order_id_match = ORDER_ID_REGEX.search(str(event.message))
-    if not order_id_match:
-        return
-
-    order_id = order_id_match.group(1)
-    order = cardinal.account.get_order(order_id)
-    data = load_data()
-    enabled_users = [u for u, v in data.items() if v.get('enabled')]
-    if not enabled_users:
-        return
-
-    if event.message.type == MessageTypes.FEEDBACK_DELETED:
-        if order and getattr(order.review, "reply", None):
-            cardinal.account.delete_review(order.id)
-            log(f"Удалён ответ на удалённый отзыв: {order_id}")
-        return
-
-    if not order or not getattr(order, 'review', None):
-        return
-
-    stars = getattr(order.review, 'stars', 0) or 0
     try:
-        stars_int = int(stars)
-    except Exception:
-        stars_int = 0
-
-    allowed = any(stars_int in data.get(uid, {}).get('stars', [5]) for uid in enabled_users)
-    if not allowed:
-        if order.review.reply:
-            cardinal.account.delete_review(order.id)
+        lot_fields = cardinal.account.get_lot_fields(lot_id)
+    except Exception as e:
+        logger.error(f"Ошибка получения полей лота {lot_id}: {e}")
+        cardinal.send_message(message.chat_id, "Не удалось получить информацию о товаре.")
         return
 
-    prompt = build_prompt(order)
-    reply_text = generate_response(prompt)
-    cardinal.account.send_review(order.id, text=reply_text, rating=stars_int)
-    log(f"Автоответ на {stars_int}⭐ отзыв ({order_id}): {reply_text}")
+    title = getattr(lot_fields, "title_ru", None) or getattr(lot_fields, "title_en", None) or "[Название не указано]"
+    description = getattr(lot_fields, "description_ru", None) or getattr(lot_fields, "description_en", None) or "[Описание не указано]"
+    price = getattr(lot_fields, "price", "—")
 
-def init_cardinal(cardinal: 'Cardinal'):
+    prompt = (
+        f"Привет! Ты - ИИ Ассистент в нашем интернет-магазине игровых ценностей. "
+        "Давай посмотрим детали и составим отличный ответ на вопрос покупателя.\n\n"
+        f"Информация о товаре:\n"
+        f"Название: {title}\n"
+        f"Описание: {description}\n"
+        f"Цена: {price} руб.\n\n"
+    )
+
+    if question:
+        prompt += f"Вопрос покупателя: {question}\nОтветь на вопрос, опираясь на характеристики товара. Не добавляй лишнего.\n\n"
+    else:
+        prompt += "Расскажи подробно о товаре, его преимуществах и особенностях.\n\n"
+
+    prompt += (
+        "- Ответить покупателю в доброжелательном тоне.\n"
+        "- Использовать умеренное количество эмодзи.\n"
+        "- Красиво структурируй текст ответа: переносы строк, короткие абзацы.\n"
+        "- Длина текста — до ~670 символов.\n"
+    )
+
+    response = generate_gpt_response(prompt, max_attempts=5)
+    if response is None:
+        cardinal.send_message(message.chat_id, "Ошибка при генерации ответа, попробуйте позже.")
+        log("Не удалось получить корректный ответ от GPT после всех попыток.")
+        return
+
+    cardinal.send_message(message.chat_id, response)
+    log("Отправил ответ покупателю")
+
+user_states = {}
+
+def set_command_start(message: Message, cardinal):
+    uid = message.chat.id
+    user_states[uid] = {"step": "set_command"}
+    cardinal.telegram.bot.send_message(uid, "Введите новую команду, которая будет запускать GPT (например: #info или !gpt).")
+
+def toggle_plugin_cmd(message: Message, cardinal):
+    data = load_data()
+    data["enabled"] = not data.get("enabled", True)
+    save_data(data)
+    state = "включён" if data["enabled"] else "выключен"
+    cardinal.telegram.bot.send_message(message.chat.id, f"Плагин теперь {state}.")
+
+def show_config_cmd(message: Message, cardinal):
+    data = load_data()
+    enabled = data.get("enabled", True)
+    cmd = data.get("command", "#info")
+    cardinal.telegram.bot.send_message(message.chat.id, f"Настройки GPT:\nВключен: {enabled}\nКоманда: <code>{cmd}</code>", parse_mode="HTML")
+
+def handle_fsm_step(message: Message, cardinal):
+    chat_id = message.chat.id
+    if chat_id not in user_states:
+        return
+
+    text = message.text.strip()
+
+    if text.startswith("/"):
+        user_states.pop(chat_id)
+        cardinal.telegram.bot.send_message(chat_id, "Операция отменена.")
+        return
+
+    state = user_states[chat_id]
+
+    if state["step"] == "set_command":
+        new_cmd = text.strip()
+        if not new_cmd:
+            cardinal.telegram.bot.send_message(chat_id, "Пустая команда — отменено.")
+            user_states.pop(chat_id)
+            return
+        if new_cmd.startswith("/"):
+            cardinal.telegram.bot.send_message(chat_id, "Команда не должна начинаться с '/'. Введите, например, #info или !gpt.")
+            user_states.pop(chat_id)
+            return
+
+        data = load_data()
+        data["command"] = new_cmd
+        save_data(data)
+        cardinal.telegram.bot.send_message(chat_id, f"Команда для запуска GPT обновлена: <code>{new_cmd}</code>", parse_mode="HTML")
+        user_states.pop(chat_id)
+        return
+
+def init_cardinal(cardinal):
     tg = cardinal.telegram
-    tg.msg_handler(lambda m: cmd_toggle(m, cardinal), commands=["gptfeedback_toggle"])
-    tg.msg_handler(lambda m: cmd_setstars(m, cardinal), commands=["gptfeedback_setstars"])
-    tg.msg_handler(lambda m: cmd_status(m, cardinal), commands=["gptfeedback_status"])
+    tg.msg_handler(lambda m: set_command_start(m, cardinal), commands=["setgptcmd"])
+    tg.msg_handler(lambda m: toggle_plugin_cmd(m, cardinal), commands=["gpttoggle"])
+    tg.msg_handler(lambda m: show_config_cmd(m, cardinal), commands=["gptshow"])
+    tg.msg_handler(lambda m: handle_fsm_step(m, cardinal), func=lambda m: m.chat.id in user_states)
 
     cardinal.add_telegram_commands(UUID, [
-        ("gptfeedback_toggle", "Включить/выключить автоматические ответы GPT", True),
-        ("gptfeedback_setstars", "Установить звёзды (пример: /gptfeedback_setstars 4 5)", True),
-        ("gptfeedback_status", "Показать настройки плагина", True),
+        ("setgptcmd", "Установить команду для GPT", True),
+        ("gpttoggle", "Вкл/выкл GPT-плагин", True),
+        ("gptshow", "Показать настройки GPT", True)
     ])
 
-    try:
-        orig_edit_plugin = keyboards.edit_plugin
-        def custom_edit_plugin(c, uuid, offset=0, ask_to_delete=False):
-            kb = orig_edit_plugin(c, uuid, offset, ask_to_delete)
-            if uuid == UUID:
-                dev_btn = InlineKeyboardButton(text="👽 Разработчик", url=f"https://t.me/{CREDITS[1:]}")
-                kb.keyboard.insert(0, [dev_btn])
-            return kb
-        keyboards.edit_plugin = custom_edit_plugin
-    except Exception:
-        pass
-
 BIND_TO_PRE_INIT = [init_cardinal]
-BIND_TO_NEW_MESSAGE = [handle_feedback_event]
-BIND_TO_DELETE = None
+BIND_TO_NEW_MESSAGE = [gpt_info_handler]
+BIND_TO_DELETE = []

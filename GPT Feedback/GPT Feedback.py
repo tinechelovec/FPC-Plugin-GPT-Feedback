@@ -21,19 +21,28 @@ if TYPE_CHECKING:
     from cardinal import Cardinal
 
 NAME = "GPT Feedback"
-VERSION = "1.2"
+VERSION = "1.3"
 DESCRIPTION = "Отвечает на отзывы через GPT."
 CREDITS = "@tinechelovec"
 UUID = "461770a6-4460-4cf5-9eec-c41dc99fc64c"
 SETTINGS_PAGE = True
 
 logger = logging.getLogger(f"FPC.{__name__}")
-PREFIX = "[GPT Feedback]"
-
-BASE_URL = "https://api.zukijourney.com/v1"
-DEFAULT_MODEL = "gpt-3.5-turbo"
+PREFIX = f"[{NAME}]"
 
 INSTRUCTION_URL = "https://teletype.in/@tinechelovec/GPT-Feedback"
+
+IO_BASE_URL = os.getenv("IOINTELLIGENCE_BASE_URL", "https://api.intelligence.io.solutions/api/v1/")
+IO_CHAT_URL = os.getenv("IOINTELLIGENCE_CHAT_URL", IO_BASE_URL.rstrip("/") + "/chat/completions")
+IO_MODEL = os.getenv("IOINTELLIGENCE_MODEL", "meta-llama/Llama-3.3-70B-Instruct")
+IO_TIMEOUT = float(os.getenv("IOINTELLIGENCE_TIMEOUT", "45"))
+IO_TEMPERATURE = float(os.getenv("IOINTELLIGENCE_TEMPERATURE", "0.2"))
+IO_API_KEY_ENV = (
+    (os.getenv("IOINTELLIGENCE_API_KEY", "io-v2-eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJvd25lciI6IjEyMjFlYTM2LTlmZDgtNGQ3ZC1hMzY5LTMxMDZiMDk4ODMzOSIsImV4cCI6NDkyMjI5NzIwNH0.fDOOdcxznSdu9IkkbyWplIBIvTer7KrBF5GWHMQnnBwc-6GT4BDPVi8HzHx0KBOM1tKvCECcMXPBoGiyszc6tg") or "").strip()
+    or (os.getenv("IONET_API_KEY", "") or "").strip()
+)
+
+DEFAULT_MODEL = IO_MODEL
 
 PLUGIN_FOLDER = "storage/plugins/gpt_feedback"
 DATA_FILE = os.path.join(PLUGIN_FOLDER, "data.json")
@@ -47,7 +56,6 @@ if not os.path.exists(DATA_FILE):
 if not os.path.exists(STATE_FILE):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump({}, f, indent=4, ensure_ascii=False)
-
 
 ORDER_ID_REGEX = re.compile(r"#([A-Za-z0-9]+)")
 MAX_ATTEMPTS = 3
@@ -163,8 +171,8 @@ def _mask_key(s: str) -> str:
         return "—"
     t = s.strip()
     if len(t) <= 10:
-        return "****"
-    return t[:4] + "…" + t[-4:]
+        return "********"
+    return t[:6] + "…" + t[-4:]
 
 def _get_config(data: dict) -> dict:
     if isinstance(data.get("global"), dict):
@@ -177,7 +185,6 @@ def _get_config(data: dict) -> dict:
             base["stars"] = [5]
         else:
             base["stars"] = sorted({int(x) for x in stars if str(x).isdigit() and 1 <= int(x) <= 5}) or [5]
-
         base.pop("prompt", None)
         return base
 
@@ -235,15 +242,17 @@ def _notify(cardinal: "Cardinal", text: str):
     except Exception as e:
         loge(f"_notify failed: {e}")
 
+def _get_api_key(cfg: dict) -> str:
+    k = (cfg.get("api_key") or "").strip()
+    if k:
+        return k
+    return (IO_API_KEY_ENV or "").strip()
+
 def _welcome_text(cfg: dict) -> str:
-    stars = cfg.get("stars", [5]) or [5]
-    model = cfg.get("model", DEFAULT_MODEL)
     return (
-        "👋 <b>GPT Feedback</b>\n\n"
-        f"Статус: {'✅ ВКЛ' if cfg.get('enabled') else '❌ ВЫКЛ'}\n"
-        f"Звёзды: {', '.join(map(str, stars))}\n"
-        f"API ключ: {'✅ Установлен' if (cfg.get('api_key') or '').strip() else '❌ Нет'} "
-        f"<code>{_mask_key((cfg.get('api_key') or '').strip())}</code>\n\n"
+        f"🧩 <b>Плагин:</b> <b>{NAME}</b>\n"
+        f"📦 <b>Версия:</b> <code>{VERSION}</code>\n"
+        f"👤 <b>Создатель:</b> <code>{CREDITS}</code>\n\n"
         "Выбери действие:"
     )
 
@@ -280,12 +289,13 @@ def open_welcome(cardinal: "Cardinal", call_or_msg):
 
 def _settings_text(cfg: dict) -> str:
     stars = cfg.get("stars", [5]) or [5]
+    key = _get_api_key(cfg)
+    key_state = "✅ задан" if key else "❌ не задан"
     return (
-        "⚙️ <b>Настройки GPT Feedback</b>\n\n"
+        "⚙️ <b>Настройки</b>\n\n"
         f"Статус: {'✅ ВКЛ' if cfg.get('enabled') else '❌ ВЫКЛ'}\n"
         f"Звёзды: {', '.join(map(str, stars))}\n"
-        f"API ключ: {'✅ Установлен' if (cfg.get('api_key') or '').strip() else '❌ Нет'} "
-        f"<code>{_mask_key((cfg.get('api_key') or '').strip())}</code>\n\n"
+        f"API ключ: <b>{key_state}</b> (<code>{_mask_key(key)}</code>)\n\n"
         "Настрой параметры ниже:"
     )
 
@@ -446,11 +456,13 @@ def _star_toggle(cardinal: "Cardinal", call, n: int):
     _safe_edit(bot, chat_id, msg_id, _stars_text(cfg), _stars_kb(cfg))
 
 def _apikey_screen_text(cfg: dict) -> str:
-    masked = _mask_key((cfg.get("api_key") or "").strip())
+    key = _get_api_key(cfg)
+    masked = _mask_key(key)
     return (
-        "🔑 <b>API ключ</b>\n\n"
+        "🔑 <b>API ключ IO Intelligence</b>\n\n"
         f"Текущий: <code>{masked}</code>\n\n"
         "Теперь отправь новый API-ключ <b>одним сообщением</b> в чат.\n"
+        "Если оставить пустым — будет использован ключ из переменных окружения.\n"
         "Чтобы отменить — нажми ❌ Отменить."
     )
 
@@ -484,7 +496,7 @@ def _parse_key_text(raw_text: str) -> str:
     if s.startswith("{") and s.endswith("}"):
         try:
             obj = json.loads(s)
-            for k in ("api_key", "token", "key", "apikey"):
+            for k in ("api_key", "token", "key", "apikey", "io_api_key"):
                 v = obj.get(k)
                 if isinstance(v, str) and v.strip():
                     return v.strip()
@@ -615,17 +627,25 @@ def _cut_700_no_dots(text: str, limit: int = MAX_CHARACTERS) -> str:
 
 def generate_response(prompt: str, api_key: str, model: str) -> str:
     if not api_key:
-        return "❌ API-ключ не настроен. Открой меню и укажи ключ."
+        return "❌ API-ключ не настроен. Открой меню и укажи ключ (или задай env IOINTELLIGENCE_API_KEY / IONET_API_KEY)."
 
-    url = f"{BASE_URL}/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model or DEFAULT_MODEL, "messages": [{"role": "user", "content": prompt}]}
+    url = IO_CHAT_URL
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": model or DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": IO_TEMPERATURE,
+    }
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code != 200:
-                logw(f"ZukiJourney HTTP {resp.status_code} (attempt {attempt}): {resp.text[:300]}")
+            resp = requests.post(url, headers=headers, json=payload, timeout=IO_TIMEOUT)
+            if resp.status_code >= 400:
+                logw(f"IO HTTP {resp.status_code} (attempt {attempt}): {(resp.text or '')[:300]}")
                 time.sleep(1)
                 continue
 
@@ -640,7 +660,7 @@ def generate_response(prompt: str, api_key: str, model: str) -> str:
             return _cut_700_no_dots(content, MAX_CHARACTERS)
 
         except Exception as e:
-            loge(f"ZukiJourney request error (attempt {attempt}): {e}")
+            loge(f"IO request error (attempt {attempt}): {e}")
             time.sleep(1)
 
     return "Спасибо за отзыв! 😊"
@@ -665,7 +685,7 @@ def _test_api(cardinal: "Cardinal", call):
     chat_id = call.message.chat.id
 
     cfg = _get_config(load_data())
-    api_key = (cfg.get("api_key") or "").strip()
+    api_key = _get_api_key(cfg)
     model = cfg.get("model", DEFAULT_MODEL)
 
     try:
@@ -675,7 +695,7 @@ def _test_api(cardinal: "Cardinal", call):
 
     if not api_key:
         try:
-            bot.answer_callback_query(call.id, "Сначала задай API ключ (🔑 API ключ).", show_alert=True)
+            bot.answer_callback_query(call.id, "Сначала задай API ключ (🔑 API ключ) или установи env IOINTELLIGENCE_API_KEY / IONET_API_KEY.", show_alert=True)
         except Exception:
             pass
         return
@@ -687,7 +707,7 @@ def _test_api(cardinal: "Cardinal", call):
 def _delete_menu_text() -> str:
     return (
         "🗑 <b>Удаление плагина</b>\n\n"
-        "Ты точно хочешь удалить <b>GPT Feedback</b>?\n"
+        f"Ты точно хочешь удалить <b>{NAME}</b>?\n"
         "Это действие может быть необратимым."
     )
 
@@ -759,7 +779,7 @@ def _delete_try(cardinal: "Cardinal", call):
         "❌ Не смог удалить плагин автоматически (в твоём Cardinal нет подходящего метода).\n\n"
         "Удаление вручную:\n"
         "1) Открой Cardinal → Плагины\n"
-        "2) Найди <b>GPT Feedback</b>\n"
+        f"2) Найди <b>{NAME}</b>\n"
         "3) Нажми <b>Удалить</b>\n\n"
         f"Ошибка (если была): <code>{escape(str(err)) if err else '—'}</code>"
     )
@@ -826,7 +846,7 @@ def _delete_our_reply(cardinal: "Cardinal", order_id: str):
         logi(f"✅ delete_review({order_id}) OK")
     except Exception as e:
         loge(f"delete_review({order_id}) failed: {e}")
-        _notify(cardinal, f"❌ GPT Feedback: не смог удалить ответ для заказа #{order_id}: {e}")
+        _notify(cardinal, f"❌ {NAME}: не смог удалить ответ для заказа #{order_id}: {e}")
 
 def _send_or_edit_reply(cardinal: "Cardinal", order_id: str, stars: int, text: str):
     try:
@@ -834,7 +854,7 @@ def _send_or_edit_reply(cardinal: "Cardinal", order_id: str, stars: int, text: s
         logi(f"✅ send_review({order_id}) OK")
     except Exception as e:
         loge(f"send_review({order_id}) failed: {e}")
-        _notify(cardinal, f"❌ GPT Feedback: не смог отправить/обновить ответ для заказа #{order_id}: {e}")
+        _notify(cardinal, f"❌ {NAME}: не смог отправить/обновить ответ для заказа #{order_id}: {e}")
 
 def handle_feedback_event(cardinal: "Cardinal", event: NewMessageEvent):
     try:
@@ -852,9 +872,9 @@ def handle_feedback_event(cardinal: "Cardinal", event: NewMessageEvent):
         if not cfg.get("enabled"):
             return
 
-        api_key = (cfg.get("api_key") or "").strip()
+        api_key = _get_api_key(cfg)
         if not api_key:
-            _notify(cardinal, "❌ GPT Feedback: нет API ключа. Открой меню и задай ключ.")
+            _notify(cardinal, f"❌ {NAME}: нет API ключа. Открой меню и задай ключ (или env IOINTELLIGENCE_API_KEY / IONET_API_KEY).")
             return
 
         try:
@@ -886,7 +906,6 @@ def handle_feedback_event(cardinal: "Cardinal", event: NewMessageEvent):
 
         review = getattr(order, "review", None)
         stars = int(getattr(review, "stars", 5) or 5)
-        review_text = (getattr(review, "text", "") or "").strip()
         fp = _buyer_review_fingerprint(order)
 
         if prev_fp and prev_fp == fp:
@@ -911,7 +930,7 @@ def handle_feedback_event(cardinal: "Cardinal", event: NewMessageEvent):
 
     except Exception as e:
         loge(f"handle_feedback_event crashed: {e}")
-        _notify(cardinal, f"❌ GPT Feedback crashed: {e}")
+        _notify(cardinal, f"❌ {NAME} crashed: {e}")
 
 def init_cardinal(cardinal: "Cardinal"):
     tg = cardinal.telegram
@@ -947,7 +966,6 @@ def init_cardinal(cardinal: "Cardinal"):
         logw(f"add_telegram_commands failed: {e}")
 
     logi("✅ GPT Feedback запущен")
-
 
 BIND_TO_PRE_INIT = [init_cardinal]
 BIND_TO_NEW_MESSAGE = [handle_feedback_event]
